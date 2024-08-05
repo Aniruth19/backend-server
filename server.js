@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -8,10 +7,11 @@ const simpleGit = require('simple-git');
 const app = express();
 app.use(express.json());
 
-// Configure AWS
-AWS.config.update({ region: 'your-region' });
+AWS.config.update({
+  region: 'ap-south-1', 
+});
 const s3 = new AWS.S3();
-const BUCKET_NAME = 'your-s3-static-hosting-bucket';
+const BUCKET_NAME = 'testerbucket-hyperverge'; 
 
 app.post('/api/clone', async (req, res) => {
   const { url } = req.body;
@@ -27,7 +27,7 @@ app.post('/api/clone', async (req, res) => {
 
       for (const file of files) {
         const filePath = path.join(dir, file);
-        const fileKey = path.join(repoName, file);
+        const fileKey = path.relative(tempDir, filePath).replace(/\\/g, '/'); // Ensure S3 path is correctly formatted
 
         if (fs.lstatSync(filePath).isDirectory()) {
           await uploadDir(filePath);
@@ -50,7 +50,7 @@ app.post('/api/clone', async (req, res) => {
     await uploadDir(tempDir);
     fs.rmSync(tempDir, { recursive: true, force: true });
 
-    const hostedUrl = `http://${BUCKET_NAME}.s3-website-your-region.amazonaws.com/${repoName}/index.html`;
+    const hostedUrl = `http://${BUCKET_NAME}.s3-website.ap-south-1.amazonaws.com/${repoName}/index.html`;
     res.send(`Repository hosted at: ${hostedUrl}`);
   } catch (err) {
     console.error(err);
