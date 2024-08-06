@@ -1,64 +1,94 @@
 const express = require('express');
+const simpleGit = require('simple-git');
 const path = require('path');
 const fs = require('fs');
-const AWS = require('aws-sdk');
-const simpleGit = require('simple-git');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const mime = require('mime-types');
 
 const app = express();
-app.use(express.json());
+const port = 3000;
 
-AWS.config.update({
-  region: 'ap-south-1', 
+// AWS S3 configuration
+const s3Client = new S3Client({
+    region: 'ap-south-1',
+    credentials: {
+        accessKeyId: '',
+        secretAccessKey: '',
+    },
 });
-const s3 = new AWS.S3();
-const BUCKET_NAME = 'testerbucket-hyperverge'; 
 
-app.post('/api/clone', async (req, res) => {
-  const { url } = req.body;
-  const repoName = path.basename(url, '.git');
-  const tempDir = path.join(__dirname, repoName);
+app.use(cors());
+app.use(bodyParser.json());
 
-  try {
-    await simpleGit().clone(url, tempDir);
-    console.log(`Repository ${repoName} cloned to ${tempDir}`);
+app.post('/clone', async (req, res) => {
+    const { githubUrl, projectType } = req.body;
 
-    const uploadDir = async (dir) => {
-      const files = fs.readdirSync(dir);
+    if (!githubUrl || !projectType) {
+        return res.status(400).json({ error: 'GitHub URL and project type are required' });
+    }
 
-      for (const file of files) {
-        const filePath = path.join(dir, file);
-        const fileKey = path.relative(tempDir, filePath).replace(/\\/g, '/'); // Ensure S3 path is correctly formatted
+    // Extract the repository name from the URL
+    const repoName = githubUrl.split('/').pop().replace('.git', '');
+    const repoDir = path.join(__dirname, 'repos', repoName);
+    const bucketName = 'testerbucket-hyperverge'; // Replace with your bucket name
+    const s3FolderPath = repoName; // Use repoName as folder in S3
 
-        if (fs.lstatSync(filePath).isDirectory()) {
-          await uploadDir(filePath);
-        } else {
-          const fileContent = fs.readFileSync(filePath);
+    try {
+        // Ensure the repos directory exists
+        fs.mkdirSync(path.join(__dirname, 'repos'), { recursive: true });
 
-          const params = {
-            Bucket: BUCKET_NAME,
-            Key: fileKey,
-            Body: fileContent,
-            ACL: 'public-read',
-          };
+        // Clone the repository
+        console.log(`Cloning the repository from ${githubUrl} into ${repoDir}`);
+        await simpleGit().clone(githubUrl, repoDir);
+        console.log('Repository cloned successfully.');
 
-          await s3.upload(params).promise();
-          console.log(`Uploaded ${fileKey} to S3`);
+        // Upload folder to S3
+        const uploadFolderToS3 = async (dir, s3Path) => {
+            const files = fs.readdirSync(dir);
+            for (const file of files) {
+                const filePath = path.join(dir, file);
+                const fileS3Path = path.join(s3Path, file).replace(/\\/g, '/'); // Use forward slashes for S3 paths
+
+                if (fs.statSync(filePath).isDirectory()) {
+                    // Recursively upload directories
+                    await uploadFolderToS3(filePath, fileS3Path);
+                } else {
+                    const fileContent = fs.readFileSync(filePath);
+                    const contentType = mime.lookup(filePath) || 'application/octet-stream'; // Determine MIME type
+
+                    const command = new PutObjectCommand({
+                        Bucket: bucketName,
+                        Key: fileS3Path,
+                        Body: fileContent,
+                        ACL: 'public-read',
+                        ContentType: contentType // Set MIME type
+                    });
+
+                    console.log(`Uploading ${fileS3Path} to S3 bucket ${bucketName} with Content-Type ${contentType}`);
+                    await s3Client.send(command);
+                }
+            }
+        };
+
+        await uploadFolderToS3(repoDir, s3FolderPath);
+
+        // Provide URL for the main file (index.html)
+        const s3Url = `https://${bucketName}.s3.ap-south-1.amazonaws.com/${s3FolderPath}/index.html`;
+        res.json({ url: s3Url });
+
+    } catch (error) {
+        console.error('Error during deployment:', error);
+        res.status(500).json({ error: 'Failed to deploy the project', details: error.message });
+    } finally {
+        // Cleanup the cloned repo directory
+        if (fs.existsSync(repoDir)) {
+            fs.rmSync(repoDir, { recursive: true, force: true });
         }
-      }
-    };
-
-    await uploadDir(tempDir);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-
-    const hostedUrl = `http://${BUCKET_NAME}.s3-website.ap-south-1.amazonaws.com/${repoName}/index.html`;
-    res.send(`Repository hosted at: ${hostedUrl}`);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('An error occurred');
-  }
+    }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(port, () => {
+    console.log(`Server is running on http://localhost:${port}`);
 });
